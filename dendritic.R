@@ -7,7 +7,8 @@ require(Seurat)
 require(org.Mm.eg.db)
 require(gage)
 require(gageData)
-
+require(ggvenn)
+require(clusterProfiler)
 
 data_importing <- function(path) {
   path1 <- paste0(path, "/droplets/")
@@ -60,15 +61,15 @@ qc_check <- function(counts) {
     geom_jitter()+
     xlab("") +
     ylab("Number of Genes") +
-    mytheme() +
-    theme_classic()
+    theme_classic() +
+    mytheme() 
   g2 <- ggplot(cell_counts, aes(x = "", y = num_cells)) +
     geom_violin(fill = "#873600") +
     geom_jitter()+
     xlab("") +
     ylab("Number of Cells") +
-    mytheme() +
-    theme_classic()
+    theme_classic() +
+    mytheme()
   pdf("plots/QC.pdf", width = 13, height = 8)
   grid.arrange(g1, g2,nrow = 1)
   dev.off()
@@ -205,53 +206,147 @@ volcano_plot <- function(compare,
   dev.off() 
 }
 
-pathway_plot <- function(compare,
-                         FDR) {
+venn_plot <- function() {
   dir.create("plots", showWarnings = F)
-  up_down <- data.frame(read_csv(paste0("DESeq2/UPDown_", 
-                                        paste0(compare, collapse = "_") , ".csv")))
-  colnames(up_down)[1] <- "genes"
-  up_down$entrez <- mapIds(org.Mm.eg.db,
-                           keys=up_down$genes,
-                           column="ENTREZID",
-                           keytype="SYMBOL",
-                           multiVals="first")
-  data(kegg.sets.mm)
-  foldchanges <- up_down$log2FoldChange
-  names(foldchanges) <- up_down$entrez
-  kegg_up_down <- gage(foldchanges, gsets = kegg.sets.mm, same.dir = TRUE)
-  pathway_up <- data.frame(kegg_up_down$greater)
-  pathway_up$ID <- str_extract(rownames(pathway_up), "mmu[0-9]+(?= )")
-  pathway_up$Pathway <- gsub("mmu[0-9]+ ", "", rownames(pathway_up))
-  pathway_up <- pathway_up[order(pathway_up$q.val, decreasing = FALSE), c(7, 8, 5, 4)]
-  colnames(pathway_up) <- c("ID", "Pathway", "n_Gene", "FDR")
-  rownames(pathway_up) <- NULL
-  pathway_up <- pathway_up[which(pathway_up$FDR < FDR), ]
-
-  pathway_down <- data.frame(kegg_up_down$less)
-  pathway_down$ID <- str_extract(rownames(pathway_down), "mmu[0-9]+(?= )")
-  pathway_down$Pathway <- gsub("mmu[0-9]+ ", "", rownames(pathway_down))
-  pathway_down <- pathway_down[order(pathway_down$q.val, decreasing = FALSE), c(7, 8, 5, 4)]
-  colnames(pathway_down) <- c("ID", "Pathway", "n_Gene", "FDR")
-  rownames(pathway_down) <- NULL
-  pathway_down <- pathway_down[which(pathway_down$FDR < FDR), ]
-  
-  pathways <- rbind(pathway_up, pathway_down)
-  pathways <- na.omit(pathways)
-  g <- pathways %>%
-    ggplot(aes(reorder(Pathway, n_Gene, sum), n_Gene)) +
-    geom_col(aes(color = FDR, fill = FDR), width = 0.4) +
-    coord_flip() + xlab("Pathway") + ylab("Enriched genes") +
-    theme_classic() +
-    scale_color_gradient(low = "#D7DBDD", high = "#186A3B") +
-    scale_fill_gradient(low = "#D7DBDD", high = "#186A3B") +
-    mytheme() +
-    labs(subtitle = "")
-  pdf(paste0("plots/Pathway_", paste0(compare, collapse = "_"), ".pdf"), width = 10, height = 8)
-  print(g)
+  deges <- list.files("DESeq2",pattern = "UPDown_")
+  tissue <- gsub("UPDown_lung_(drop|facs)_", "", deges)
+  tissue <- gsub(".csv", "", tissue)
+  all_DEGs <- list()
+  for(i in seq_along(deges)){
+    DEG_table <- data.frame(read_csv(paste0("DESeq2/", deges[i])))
+    all_DEGs[[tissue[i]]] <- DEG_table
+  }
+  genes <- list()
+  for(i in seq_along(all_DEGs)) {
+    genes[[tissue[i]]] <- all_DEGs[[i]][[1]]
+  }
+  common_genes <- Reduce(intersect, genes)
+  long_table <- do.call(rbind, all_DEGs)
+  colnames(long_table)[1] <- "Genes"
+  long_table <- long_table[!duplicated(long_table$Genes),]
+  common_table <- long_table[which(long_table$Genes %in% common_genes), ]
+  write_csv(common_table, "DESeq2/Common.csv")
+  unique_genes <- list()
+  for(i in seq_along(genes)) {
+    gene <- which(!genes[[i]] %in% common_genes)
+    unique_genes[[tissue[i]]] <- genes[[i]][gene]
+  }
+  for(i in seq_along(unique_genes)) {
+    table <- long_table[which(long_table$Genes %in% unique_genes[[i]]), ]
+    write_csv(table, paste0("DESeq2/Unique_",names(unique_genes)[i], ".csv"))
+  }
+  my_pal <- c("#1B9E77",
+              "#7570B3", 
+              "#E7298A",
+              "#66A61E")
+  venn <- ggvenn(genes, 
+                  fill_color = my_pal,
+                  stroke_size = 0.5,
+                  set_name_size = 4)
+  pdf("plots/Venn_plot.pdf", width = 10, height = 8)
+  print(venn)
   dev.off() 
 }
 
+pathway_plot <- function(pathwayfor,
+                         FDR, 
+                         top) {
+  dir.create("plots", showWarnings = F)
+  files <- list.files("DESeq2",pattern = pathwayfor)
+  
+  for(i in seq_along(files)) {
+    
+    filename <- gsub("Unique_", "", files[i])
+    filename <- gsub(".csv", "", filename)
+    up_down <- data.frame(read_csv(paste0("DESeq2/", files[i])))
+    up_down$entrez <- mapIds(org.Mm.eg.db,
+                             keys=up_down$Genes,
+                             column="ENTREZID",
+                             keytype="SYMBOL",
+                             multiVals="first")
+    data(kegg.sets.mm)
+    foldchanges <- up_down$log2FoldChange
+    names(foldchanges) <- up_down$entrez
+    kegg_up_down <- gage(foldchanges, gsets = kegg.sets.mm, same.dir = TRUE)
+    pathway_up <- data.frame(kegg_up_down$greater)
+    pathway_up$ID <- str_extract(rownames(pathway_up), "mmu[0-9]+(?= )")
+    pathway_up$Pathway <- gsub("mmu[0-9]+ ", "", rownames(pathway_up))
+    pathway_up <- pathway_up[order(pathway_up$q.val, decreasing = FALSE), c(7, 8, 5, 4)]
+    colnames(pathway_up) <- c("ID", "Pathway", "n_Gene", "FDR")
+    rownames(pathway_up) <- NULL
+    pathway_up <- pathway_up[which(pathway_up$FDR < FDR), ]
+    
+    pathway_down <- data.frame(kegg_up_down$less)
+    pathway_down$ID <- str_extract(rownames(pathway_down), "mmu[0-9]+(?= )")
+    pathway_down$Pathway <- gsub("mmu[0-9]+ ", "", rownames(pathway_down))
+    pathway_down <- pathway_down[order(pathway_down$q.val, decreasing = FALSE), c(7, 8, 5, 4)]
+    colnames(pathway_down) <- c("ID", "Pathway", "n_Gene", "FDR")
+    rownames(pathway_down) <- NULL
+    pathway_down <- pathway_down[which(pathway_down$FDR < FDR), ]
+    
+    pathways <- rbind(pathway_up, pathway_down)
+    pathways <- na.omit(pathways)
+    g <- pathways[1:top,] %>%
+      ggplot(aes(reorder(Pathway, n_Gene, sum), n_Gene)) +
+      geom_col(aes(color = FDR, fill = FDR), width = 0.4) +
+      coord_flip() + xlab("Pathway") + ylab("Enriched genes") +
+      theme_classic() +
+      scale_color_gradient(low = "#186A3B", high = "#D7DBDD") +
+      scale_fill_gradient(low = "#186A3B", high = "#D7DBDD") +
+      mytheme() +
+      labs(subtitle = filename)
+    pdf(paste0("plots/Pathway_",filename , ".pdf"), width = 10, height = 8)
+    print(g)
+    dev.off() 
+  }
+}
+
+go_dotplot <- function(gofor, 
+                       pval, 
+                       qval,
+                       top) {
+  dir.create("plots", showWarnings = F)
+  files <- list.files("DESeq2",pattern = gofor)
+  for(i in seq_along(files)) {
+    filename <- gsub("Unique_", "", files[i])
+    filename <- gsub(".csv", "", filename)
+    up_down <- data.frame(read_csv(paste0("DESeq2/", files[i])))
+    up_down$entrez <- mapIds(org.Mm.eg.db,
+                             keys=up_down$Genes,
+                             column="ENTREZID",
+                             keytype="SYMBOL",
+                             multiVals="first")
+    go_enrichment <- enrichGO(up_down$entrez,
+                              OrgDb = org.Mm.eg.db,
+                              ont = "BP",
+                              pvalueCutoff = pval,
+                              qvalueCutoff = qval)
+    
+    res <- go_enrichment@result
+    res$total <- as.numeric(gsub("[0-9]+/", "", res$GeneRatio))
+    res$GeneRatio <- res$Count/res$total
+    g <- ggplot(data = res[1:top, ], aes(reorder(Description, GeneRatio, sum),
+                                        GeneRatio, color = p.adjust, size = Count)) +
+      geom_point() +
+      coord_flip() +
+      scale_color_gradient(low = "red", high = "blue") +
+      xlab("Biological Process") +
+      ylab("Gene Ratio") +
+      theme_classic() +
+      theme(axis.text = element_text(family = "Times",size = 14 , colour = "black"),
+            axis.text.x = element_text(family = "Times",colour = "black", size = 10),
+            axis.text.y = element_text(family = "Times",colour = "black", size = 10),
+            plot.subtitle = element_text(family = "Times",size = 16, colour = "black", hjust = 0.5),
+            axis.title.y = element_text(family = "Times", size = 12, angle = 90),
+            axis.title.x = element_text(family = "Times", size = 12, angle = 00),
+            legend.text = element_text(size = 12, family = "Times"), 
+            legend.title = element_text(size = 12, family = "Times")) +
+      labs(subtitle = filename)
+    pdf(paste0("plots/GO_term_",filename , ".pdf"), width = 10, height = 8)
+    print(g)
+    dev.off() 
+  }
+}
 
 set.seed(1234)
 # Importing data
@@ -285,21 +380,21 @@ deseq2_results(counts = counts,
               groups = groups,
               reference = "lung_drop", 
               contrasts = c("lung_facs", "spleen_drop"),
-              FC = 1, 
-              padj = 0.05)
+              FC = 0.1, 
+              padj = 0.1)
 deseq2_results(counts = counts,
               groups = groups,
-              reference = "lung_drop", 
-              contrasts = c("lung_drop", "spleen_drop"),
-              FC = 1, 
-              padj = 0.05)
+              reference = "lung_facs", 
+              contrasts = c("lung_drop", "lung_facs"),
+              FC = 0.1, 
+              padj = 0.1)
 
 deseq2_results(counts = counts,
               groups = groups,
-              reference = "lung_drop", 
+              reference = "lung_facs", 
               contrasts = c("lung_facs", "lung_drop"),
-              FC = 1, 
-              padj = 0.05)
+              FC = 0.1, 
+              padj = 0.1)
 
 # Volcano of different comparisons
 volcano_plot(compare = c("lung_facs", "spleen_drop"), 
@@ -307,7 +402,7 @@ volcano_plot(compare = c("lung_facs", "spleen_drop"),
              Up_FC = 1, 
              Down_FC = -1)
 
-volcano_plot(compare = c("lung_drop", "spleen_drop"), 
+volcano_plot(compare = c("lung_drop", "lung_facs"), 
              padjlevel = 0.05,
              Up_FC = 1, 
              Down_FC = -1)
@@ -316,12 +411,27 @@ volcano_plot(compare = c("lung_facs", "lung_drop"),
              padjlevel = 0.05,
              Up_FC = 1, 
              Down_FC = -1)
-# Pathway plot of different comparisons
 
-pathway_plot(compare = c("lung_facs", "spleen_drop"),
-             FDR = 0.05)
-pathway_plot(compare = c("lung_drop", "spleen_drop"),
-             FDR = 0.05)
-pathway_plot(compare = c("lung_facs", "lung_drop"),
-             FDR = 0.05)
+# Finding common and different genes between lung and spleen
+venn_plot()
+
+# Pathway plot of common and different genes
+
+pathway_plot(pathwayfor = "Unique",
+             FDR = 0.5, 
+             top = 20)
+pathway_plot(pathwayfor = "Common",
+             FDR = 0.5,
+             top = 20)
+
+# G0 terms 
+go_dotplot(gofor = "Unique", 
+           pval = 0.05, 
+           qval = 0.1, 
+           top = 20)
+
+go_dotplot(gofor = "Common", 
+           pval = 0.05, 
+           qval = 0.1, 
+           top = 20)
 
